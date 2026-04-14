@@ -206,6 +206,65 @@ def _is_relevant(title: str, category: str) -> bool:
     return True
 
 
+def _affix_exclusion_check(query: str, products: list[dict]) -> list[dict]:
+    """
+    Ultra-fast deterministic model suffix exclusion.
+    If the search query is for a BASE model (e.g. '13'), strictly reject
+    search engine results that leaked trailing suffixes (e.g. '13R', '13 Pro').
+    """
+    valid_products = []
+    query_lower = query.lower()
+    
+    # Extract structural model tokens (e.g. '13', 'm3', 's24') from the normalized query
+    model_tokens = re.findall(r'\b[a-z]*[0-9]+[a-z]*\b', query_lower)
+    
+    for p in products:
+        title_lower = p.get('title', '').lower()
+        is_valid = True
+        
+        for token in model_tokens:
+            if re.match(r'^\d+(g|gb|tb|mah|hz|w|inch|cm)$', token):
+                continue
+                
+            # POSITIVE MATCH: Must physically contain the core model token
+            if not re.search(rf'(?<![A-Za-z0-9]){re.escape(token)}(?![A-Za-z0-9])', title_lower):
+                logger.info(f"Filtered out missing core token '{token}' in '{title_lower}'")
+                is_valid = False
+                break
+                
+            # Reject if token is structurally embedded in something else (e.g., '13R')
+            attached_suffix_pattern = rf'\b{re.escape(token)}[A-Za-z]+\b'
+            for match in re.findall(attached_suffix_pattern, title_lower):
+                if match not in query_lower:
+                    logger.info(f"Filtered out suffix variant: '{match}' in '{title_lower}'")
+                    is_valid = False
+                    break
+            
+            # Reject if token has separated generic suffix (e.g. '13 Pro')
+            variant_words = ['pro', 'max', 'ultra', 'plus', 'fe', 'lite', 'se', 'r', 'mini', 'air', 'studio']
+            for var in variant_words:
+                sep_pattern = rf'\b{re.escape(token)}\s+{var}\b'
+                if re.search(sep_pattern, title_lower):
+                    if not re.search(sep_pattern, query_lower) and var not in query_lower:
+                        logger.info(f"Filtered out variant word: '{var}' in '{title_lower}'")
+                        is_valid = False
+                        break
+            if not is_valid:
+                break
+                
+        # Guard against Desktop matching Laptop (Mac vs iMac/Mac mini)
+        if 'mac' in query_lower and 'macbook' not in query_lower:
+            if 'imac' in title_lower and 'imac' not in query_lower:
+                is_valid = False
+            elif 'mac mini' in title_lower and 'mini' not in query_lower:
+                is_valid = False
+
+        if is_valid:
+            valid_products.append(p)
+            
+    return valid_products
+
+
 # ── Deduplication ─────────────────────────────────────────────────────────────
 
 def _deduplicate(products: list[dict]) -> list[dict]:
@@ -454,6 +513,8 @@ def search_agent(state: AgentState) -> dict:
                                 existing_titles.add(p["title"])
 
                 if results:
+                    results = _affix_exclusion_check(query, results)
+                if results:
                     return results, False
                 logger.warning("Serper returned 0 products")
             except (RetryError, Exception) as e:
@@ -464,6 +525,8 @@ def search_agent(state: AgentState) -> dict:
         if os.getenv("GROQ_API_KEY"):
             try:
                 results = _call_groq_search(query, max_price=max_price, category=category)
+                if results:
+                    results = _affix_exclusion_check(query, results)
                 if results:
                     logger.info(f"Groq fallback returned {len(results)} products")
                     return results, False
