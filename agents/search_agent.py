@@ -215,15 +215,24 @@ def _affix_exclusion_check(query: str, products: list[dict]) -> list[dict]:
     valid_products = []
     query_lower = query.lower()
     
+    # Provide immunity to price integers so they aren't mistaken as model tokens (e.g. '4000')
+    query_no_price = re.sub(r'(under|below|less than|max|budget|rs\.?|₹)\s*[\d,]+\s*k?\b', '', query_lower)
+    query_no_price = re.sub(r'\b[\d,]+\s*k?\s*(?:mein|me\b|rupay|rupee)', '', query_no_price)
+
     # Extract structural model tokens (e.g. '13', 'm3', 's24') from the normalized query
-    model_tokens = re.findall(r'\b[a-z]*[0-9]+[a-z]*\b', query_lower)
+    model_tokens = re.findall(r'\b[a-z]*[0-9]+[a-z]*\b', query_no_price)
     
     for p in products:
         title_lower = p.get('title', '').lower()
         is_valid = True
         
         for token in model_tokens:
-            if re.match(r'^\d+(g|gb|tb|mah|hz|w|inch|cm)$', token):
+            # Skip pure specifications (e.g., '144hz', '5g')
+            if re.match(r'^\d+(g|gb|tb|mah|hz|w|inch|cm|k)$', token):
+                continue
+            
+            # Skip generalized specs that blend letters and numbers (e.g., 'wifi6', 'ddr5', 'gen4')
+            if re.match(r'^(wifi|gen|ddr|usb|bt|hdmi)[0-9]+$', token):
                 continue
                 
             # POSITIVE MATCH: Must physically contain the core model token
@@ -360,12 +369,33 @@ def _parse_serper_response(
         if not _is_relevant(title, category):
             continue
 
-        # Fix broken 'ibp=oshop' links by generating a standard Google Shopping link
+        # Fix broken 'ibp=oshop' links by routing directly to the storefront
         raw_link = item.get("link", "#")
-        if "ibp=oshop" in raw_link:
+        if "ibp=oshop" in raw_link or "google.com" in raw_link:
             import urllib.parse
             safe_title = urllib.parse.quote_plus(title)
-            raw_link = f"https://www.google.com/search?tbm=shop&q={safe_title}"
+            source_lower = item.get("source", "").lower()
+            
+            if "amazon" in source_lower:
+                raw_link = f"https://www.amazon.in/s?k={safe_title}"
+            elif "flipkart" in source_lower:
+                raw_link = f"https://www.flipkart.com/search?q={safe_title}"
+            elif "reliance" in source_lower:
+                raw_link = f"https://www.reliancedigital.in/search?q={safe_title}:relevance"
+            elif "croma" in source_lower:
+                raw_link = f"https://www.croma.com/searchB?q={safe_title}"
+            elif "vijay sales" in source_lower:
+                raw_link = f"https://www.vijaysales.com/search/{safe_title}"
+            elif "jiomart" in source_lower:
+                raw_link = f"https://www.jiomart.com/search/{safe_title}"
+            elif "tata cliq" in source_lower:
+                raw_link = f"https://www.tatacliq.com/search/?searchCategory=all&text={safe_title}"
+            else:
+                # Absolute Fallback: Use DuckDuckGo's "I'm Feeling Lucky" (!ducky) auto-redirect.
+                # This guarantees the user is instantly redirected to the store's direct website
+                # instead of hitting a Google search results page.
+                safe_source = urllib.parse.quote_plus(item.get("source", ""))
+                raw_link = f"https://duckduckgo.com/?q=%21ducky+{safe_title}+{safe_source}"
 
         products.append({
             "title":            title,
